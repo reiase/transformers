@@ -52,6 +52,7 @@ from ...utils import (
 from ...utils.deprecation import deprecate_kwarg
 from .configuration_qwen2_moe import Qwen2MoeConfig
 
+from transformers.models.inspect import inspect
 
 if is_flash_attn_2_available():
     from ...modeling_flash_attention_utils import _flash_attention_forward
@@ -266,7 +267,7 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
 
 # Modified from transformers.models.mistral.modeling_mistral.MistralMLP with Mistral->Qwen2Moe
 class Qwen2MoeMLP(nn.Module):
-    def __init__(self, config, intermediate_size=None):
+    def __init__(self, config, intermediate_size=None, index=None):
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
@@ -275,8 +276,14 @@ class Qwen2MoeMLP(nn.Module):
         self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
         self.act_fn = ACT2FN[config.hidden_act]
+        self.index=index
 
     def forward(self, x):
+        inspect.input(x, name=f"input expert[{self.index}]")
+        inspect.linear(self.up_proj, x, name=f"up_proj[{self.index}]")
+        inspect.linear(self.gate_proj, x, name=f"gate_proj[{self.index}]")
+        inspect.linear(self.down_proj, self.act_fn(self.gate_proj(x)) * self.up_proj(x), name=f"down_proj[{self.index}]")
+        
         return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
 
@@ -614,20 +621,23 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
         # gating
         self.gate = nn.Linear(config.hidden_size, config.num_experts, bias=False)
         self.experts = nn.ModuleList(
-            [Qwen2MoeMLP(config, intermediate_size=config.moe_intermediate_size) for _ in range(self.num_experts)]
+            [Qwen2MoeMLP(config, intermediate_size=config.moe_intermediate_size, index=i) for i in range(self.num_experts)]
         )
 
-        self.shared_expert = Qwen2MoeMLP(config, intermediate_size=config.shared_expert_intermediate_size)
+        self.shared_expert = Qwen2MoeMLP(config, intermediate_size=config.shared_expert_intermediate_size,index=-1)
         self.shared_expert_gate = torch.nn.Linear(config.hidden_size, 1, bias=False)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """ """
+        inspect.input(hidden_states, name=f"input moe")
+        inspect.input(self.gate.weight, name=f"gate weight")
         batch_size, sequence_length, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
         # router_logits: (batch * sequence_length, n_experts)
         router_logits = self.gate(hidden_states)
 
         routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
+        import ipdb; ipdb.set_trace()
         routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
         if self.norm_topk_prob:
             routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
@@ -996,7 +1006,9 @@ class Qwen2MoeModel(Qwen2MoePreTrainedModel):
         all_router_logits = () if output_router_logits else None
         next_decoder_cache = None
 
+        inspect.reset()
         for decoder_layer in self.layers:
+            inspect.step()
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
@@ -1036,7 +1048,7 @@ class Qwen2MoeModel(Qwen2MoePreTrainedModel):
 
             if output_router_logits and layer_outputs[-1] is not None:
                 all_router_logits += (layer_outputs[-1],)
-
+        return #####################
         hidden_states = self.norm(hidden_states)
 
         # add hidden states from the last decoder layer

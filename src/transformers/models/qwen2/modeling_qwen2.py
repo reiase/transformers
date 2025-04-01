@@ -35,6 +35,8 @@ from ...utils import (
 from ...utils.deprecation import deprecate_kwarg
 from .configuration_qwen2 import Qwen2Config
 
+from transformers.models.inspect import inspect
+
 
 logger = logging.get_logger(__name__)
 
@@ -54,6 +56,9 @@ class Qwen2MLP(nn.Module):
         self.act_fn = ACT2FN[config.hidden_act]
 
     def forward(self, x):
+        inspect.linear(self.up_proj, x, name="up_proj")
+        inspect.linear(self.gate_proj, x, name="gate_proj")
+        inspect.linear(self.down_proj, self.act_fn(self.gate_proj(x)) * self.up_proj(x), name="down_proj")
         down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
         return down_proj
 
@@ -559,7 +564,9 @@ class Qwen2Model(Qwen2PreTrainedModel):
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
 
+        inspect.reset()
         for decoder_layer in self.layers[: self.config.num_hidden_layers]:
+            inspect.step()
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
